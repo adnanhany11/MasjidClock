@@ -4,31 +4,27 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-java@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
       - name: Install Cordova
         run: npm install -g cordova
-      - name: Create App
-        run: cordova create app com.masjid.clock MasjidClock
-      - name: Copy Files
+      - name: Create App and Download Website
         run: |
-          if [ -f "index.html" ]; then cp index.html app/www/; fi
-          if [ -f "src/index.html" ]; then cp src/index.html app/www/; fi
-          if [ -d "sounds" ]; then cp -r sounds app/www/; fi
-          if [ -d "src/sounds" ]; then cp -r src/sounds app/www/; fi
+          cordova create app com.adnan.masjidclock MasjidClock
+          curl -L -o app/www/index.html "https://clockislam.42web.io/index.php"
       - name: Build APK
         run: |
           cd app
           cordova platform add android
           cordova build android
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: MasjidClock-APK
           path: app/platforms/android/app/build/outputs/apk/debug/app-debug.apk
