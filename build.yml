@@ -28,8 +28,6 @@ jobs:
           echo "index.html not found locally, downloading from live site..."
           curl -L -o app/www/index.html "https://clockislam.42web.io/index.php"
         fi
-        
-        # نسخ مجلد الصوت إن وجد
         if [ -d "sounds" ]; then cp -r sounds app/www/; fi
         if [ -d "src/sounds" ]; then cp -r src/sounds app/www/; fi
     - name: Build APK
