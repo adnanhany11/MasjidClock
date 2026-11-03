@@ -1,0 +1,10 @@
+{
+	"appId": "com.masjid.clock",
+	"appName": "MasjidClock",
+	"webDir": "dist",
+	"plugins": {
+		"SplashScreen": {
+			"launchAutoHide": false
+		}
+	}
+}
