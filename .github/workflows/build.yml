@@ -23,7 +23,6 @@ jobs:
           elif [ -f "src/index.html" ]; then
             cp src/index.html app/www/
           fi
-          # البحث عن مجلد الصوت إن وجد
           if [ -d "sounds" ]; then cp -r sounds app/www/; fi
           if [ -d "src/sounds" ]; then cp -r src/sounds app/www/; fi
       - name: Build APK
