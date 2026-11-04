@@ -1,32 +1,221 @@
+<?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+$CONFIG = [
+    'default_lat'   => 35.4414,
+    'default_lng'   => 36.6508,
+    'default_city'  => 'خان شيخون / إدلب',
+    'timezone'      => 'Asia/Damascus',
+    'method'        => 'MWL',
+    'madhab'        => 'Shafi',
+    'iqama_minutes' => [
+        'Fajr' => 30, 'Sunrise' => 20, 'Dhuhr' => 15,
+        'Asr'  => 15, 'Maghrib' => 10, 'Isha'  => 15,
+    ],
+];
+
+$METHOD_INFO = [
+    'MWL'     => ['name' => 'رابطة العالم الإسلامي', 'fajr' => 18.0, 'isha' => 17.0],
+    'ISNA'    => ['name' => 'الجمعية الإسلامية لأمريكا الشمالية', 'fajr' => 15.0, 'isha' => 15.0],
+    'Egypt'   => ['name' => 'الهيئة المصرية العامة للمساحة', 'fajr' => 19.5, 'isha' => 17.5],
+    'Makkah'  => ['name' => 'جامعة أم القرى - مكة', 'fajr' => 18.5, 'isha' => 90],
+    'Karachi' => ['name' => 'جامعة العلوم الإسلامية - كراتشي', 'fajr' => 18.0, 'isha' => 18.0],
+];
+$currentMethod = isset($METHOD_INFO[$CONFIG['method']]) ? $METHOD_INFO[$CONFIG['method']] : $METHOD_INFO['MWL'];
+$madhabLabel = ($CONFIG['madhab'] === 'Hanafi') ? 'الحنفي (ظل المثلين)' : 'الشافعي (ظل المثل)';
+
+$ONESIGNAL_APP_ID = "528cb1c3-6d21-4673-a6c3-3fe38ea0c456";
+
+class StandalonePrayerTimes {
+    private $lat, $lng, $timezone, $method, $madhab;
+    private $methods = [
+        'MWL'     => ['fajr' => 18.0, 'isha' => 17.0],
+        'ISNA'    => ['fajr' => 15.0, 'isha' => 15.0],
+        'Egypt'   => ['fajr' => 19.5, 'isha' => 17.5],
+        'Makkah'  => ['fajr' => 18.5, 'isha' => 0.0],
+        'Karachi' => ['fajr' => 18.0, 'isha' => 18.0],
+    ];
+
+    public function __construct($lat, $lng, $timezone, $method = 'MWL', $madhab = 'Shafi') {
+        $this->lat = (float)$lat; $this->lng = (float)$lng;
+        $this->timezone = $timezone; $this->method = $method; $this->madhab = $madhab;
+    }
+
+    private function normalizeAngle($a) { return fmod(fmod($a, 360.0) + 360.0, 360.0); }
+    private function normalizeHour($h)  { return fmod(fmod($h, 24.0) + 24.0, 24.0); }
+    private function acosSafe($x) { $x = max(-1.0, min(1.0, $x)); return rad2deg(acos($x)); }
+
+    public function calculate($year, $month, $day) {
+        if ($month <= 2) { $year -= 1; $month += 12; }
+        $A = floor($year / 100);
+        $B = 2 - $A + floor($A / 4);
+        $JD = floor(365.25 * ($year + 4716)) + floor(30.6001 * ($month + 1)) + $day + $B - 1524.5;
+        $D = $JD - 2451545.0;
+        $g = $this->normalizeAngle(357.529 + 0.98560028 * $D);
+        $q = $this->normalizeAngle(280.459 + 0.98564736 * $D);
+        $L = $this->normalizeAngle($q + 1.915 * sin(deg2rad($g)) + 0.020 * sin(deg2rad(2 * $g)));
+        $e = 23.439 - 0.00000036 * $D;
+        $RA = rad2deg(atan2(cos(deg2rad($e)) * sin(deg2rad($L)), cos(deg2rad($L)))) / 15.0;
+        $RA = $this->normalizeHour($RA);
+        $EqT = $q / 15.0 - $RA;
+        $Decl = rad2deg(asin(sin(deg2rad($e)) * sin(deg2rad($L))));
+
+        try {
+            $tzOffset = (new DateTimeZone($this->timezone))
+                ->getOffset(new DateTime("now", new DateTimeZone($this->timezone))) / 3600;
+        } catch (Exception $ex) { $tzOffset = 3; }
+
+        $DhuhrLocal = 12 + $tzOffset - $this->lng / 15.0 - $EqT;
+        $fajrAngle = $this->methods[$this->method]['fajr'];
+        $ishaAngle = $this->methods[$this->method]['isha'];
+        $shadowFactor = ($this->madhab === 'Hanafi') ? 2.0 : 1.0;
+
+        $calcDiff = function($angleDeg) use ($Decl) {
+            $num = -sin(deg2rad($angleDeg)) - sin(deg2rad($Decl)) * sin(deg2rad($this->lat));
+            $den =  cos(deg2rad($Decl)) * cos(deg2rad($this->lat));
+            if (abs($den) < 1e-10) return null;
+            $cosT = $num / $den;
+            if ($cosT > 1.0 || $cosT < -1.0) return null;
+            return (1.0 / 15.0) * $this->acosSafe($cosT);
+        };
+
+        $fajrDiff    = $calcDiff($fajrAngle);
+        $sunriseDiff = $calcDiff(0.833);
+        $ishaDiff    = ($ishaAngle > 0) ? $calcDiff($ishaAngle) : null;
+        $asrAlt  = rad2deg(atan(1.0 / ($shadowFactor + tan(deg2rad(abs($this->lat - $Decl))))));
+        $asrDiff = $calcDiff(-$asrAlt);
+
+        $fajr    = ($fajrDiff    !== null) ? $DhuhrLocal - $fajrDiff    : null;
+        $sunrise = ($sunriseDiff !== null) ? $DhuhrLocal - $sunriseDiff : null;
+        $dhuhr   = $DhuhrLocal;
+        $asr     = ($asrDiff     !== null) ? $DhuhrLocal + $asrDiff     : null;
+        $maghrib = ($sunriseDiff !== null) ? $DhuhrLocal + $sunriseDiff : null;
+        if ($ishaAngle == 0 && $maghrib !== null) $isha = $maghrib + 1.5;
+        else $isha = ($ishaDiff !== null) ? $DhuhrLocal + $ishaDiff : null;
+
+        return [
+            'Fajr' => $this->formatTime($fajr), 'Sunrise' => $this->formatTime($sunrise),
+            'Dhuhr' => $this->formatTime($dhuhr), 'Asr' => $this->formatTime($asr),
+            'Maghrib' => $this->formatTime($maghrib), 'Isha' => $this->formatTime($isha),
+        ];
+    }
+
+    private function formatTime($hours) {
+        if ($hours === null || is_nan($hours)) return '--:--';
+        $hours = $this->normalizeHour($hours);
+        $h = (int)floor($hours);
+        $m = (int)floor(($hours - $h) * 60);
+        return sprintf('%02d:%02d', $h, $m);
+    }
+}
+
+$lat          = isset($_GET['lat'])  ? (float)$_GET['lat']  : $CONFIG['default_lat'];
+$lng          = isset($_GET['lng'])  ? (float)$_GET['lng']  : $CONFIG['default_lng'];
+$locationName = isset($_GET['city']) ? $_GET['city']        : $CONFIG['default_city'];
+$timezone     = $CONFIG['timezone'];
+date_default_timezone_set($timezone);
+
+$calculator = new StandalonePrayerTimes($lat, $lng, $timezone, $CONFIG['method'], $CONFIG['madhab']);
+$times = $calculator->calculate(date('Y'), date('n'), date('j'));
+
+function addMinutes($timeStr, $minutes) {
+    if ($timeStr === '--:--') return '--:--';
+    $time = DateTime::createFromFormat('H:i', $timeStr);
+    if (!$time) return '--:--';
+    $time->modify("+{$minutes} minutes");
+    return $time->format('H:i');
+}
+
+function formatTime12($time24) {
+    if (!$time24 || $time24 === '--:--') return '--:--';
+    $parts = explode(':', $time24);
+    if (count($parts) < 2) return $time24;
+    $h = (int)$parts[0]; $m = (int)$parts[1];
+    $h12 = $h % 12; if ($h12 === 0) $h12 = 12;
+    return sprintf('%02d:%02d', $h12, $m);
+}
+
+$prayersData = [
+    ['key' => 'Fajr',    'name' => 'الفجر',          'display' => 'الفَجْر',          'adhan' => $times['Fajr'],    'adhan12' => formatTime12($times['Fajr']),    'iqama' => addMinutes($times['Fajr'],    $CONFIG['iqama_minutes']['Fajr']),    'iqama12' => formatTime12(addMinutes($times['Fajr'],$CONFIG['iqama_minutes']['Fajr']))],
+    ['key' => 'Sunrise', 'name' => 'الشروق  الضحى', 'display' => '<span style="color:#f87171;">الشّرُوق</span> &nbsp; <span style="color:#34d399;">الضُّحى</span>', 'adhan' => $times['Sunrise'], 'adhan12' => formatTime12($times['Sunrise']), 'iqama' => addMinutes($times['Sunrise'],$CONFIG['iqama_minutes']['Sunrise']), 'iqama12' => formatTime12(addMinutes($times['Sunrise'],$CONFIG['iqama_minutes']['Sunrise']))],
+    ['key' => 'Dhuhr',   'name' => 'الظهـــر',       'display' => 'الظُّهْـــر',       'adhan' => $times['Dhuhr'],   'adhan12' => formatTime12($times['Dhuhr']),   'iqama' => addMinutes($times['Dhuhr'],$CONFIG['iqama_minutes']['Dhuhr']),   'iqama12' => formatTime12(addMinutes($times['Dhuhr'],$CONFIG['iqama_minutes']['Dhuhr']))],
+    ['key' => 'Asr',     'name' => 'العصـــر',       'display' => 'العَصْـــر',       'adhan' => $times['Asr'],     'adhan12' => formatTime12($times['Asr']),     'iqama' => addMinutes($times['Asr'],$CONFIG['iqama_minutes']['Asr']),     'iqama12' => formatTime12(addMinutes($times['Asr'],$CONFIG['iqama_minutes']['Asr']))],
+    ['key' => 'Maghrib', 'name' => 'المغــرب',       'display' => 'المَغْــرب',       'adhan' => $times['Maghrib'], 'adhan12' => formatTime12($times['Maghrib']), 'iqama' => addMinutes($times['Maghrib'],$CONFIG['iqama_minutes']['Maghrib']), 'iqama12' => formatTime12(addMinutes($times['Maghrib'],$CONFIG['iqama_minutes']['Maghrib']))],
+    ['key' => 'Isha',    'name' => 'العشــاء',       'display' => 'العِشَــاء',       'adhan' => $times['Isha'],    'adhan12' => formatTime12($times['Isha']),    'iqama' => addMinutes($times['Isha'],$CONFIG['iqama_minutes']['Isha']),    'iqama12' => formatTime12(addMinutes($times['Isha'],$CONFIG['iqama_minutes']['Isha']))],
+];
+
+function getHijriDate() {
+    $day = date('j'); $month = date('n'); $year = date('Y');
+    $jd = GregorianToJD($month, $day, $year);
+    $l = $jd - 1948440 + 10632;
+    $n = (int)(($l - 1) / 10631); $l = $l - 10631 * $n + 354;
+    $j = ((int)((10985 - $l) / 5316)) * ((int)((50 * $l) / 17719))
+       + ((int)($l / 5670)) * ((int)((43 * $l) / 15238));
+    $l = $l - ((int)((30 - $j) / 15)) * ((int)((17719 * $j) / 50))
+       - ((int)($j / 16)) * ((int)((15238 * $j) / 43)) + 29;
+    $m = (int)((24 * $l) / 709);
+    $d = $l - (int)((709 * $m) / 24); $y = 30 * $n + $j - 30;
+    $months = ["محرم", "صفر", "ربيع الأول", "ربيع الثاني", "جمادى الأولى", "جمادى الآخرة",
+               "رجب", "شعبان", "رمضان", "شوال", "ذو القعدة", "ذو الحجة"];
+    return ['numbers' => sprintf('%04d/%02d/%02d', $y, $m, $d), 'month_name' => $months[$m - 1] ?? ''];
+}
+
+$hijri = getHijriDate();
+$gregorianNumbers = date('Y/m/d');
+$monthsGregorian = ["كانون الثاني", "شباط", "آذار", "نيسان", "أيار", "حزيران",
+                    "تموز", "آب", "أيلول", "تشرين الأول", "تشرين الثاني", "كانون الأول"];
+$gregorianMonthName = $monthsGregorian[date('n') - 1];
+$daysArray = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+$todayName = $daysArray[date('w')];
+
+$temperature = '--';
+$weatherUrl  = "https://api.open-meteo.com/v1/forecast?latitude={$lat}&longitude={$lng}&current_weather=true";
+$ctx = stream_context_create(['http' => ['timeout' => 3, 'user_agent' => 'PrayerClock/1.0']]);
+$weatherJson = @file_get_contents($weatherUrl, false, $ctx);
+if ($weatherJson) {
+    $w = json_decode($weatherJson, true);
+    if (isset($w['current_weather']['temperature'])) $temperature = round($w['current_weather']['temperature']);
+}
+
+$currentH24 = (int)date('G');
+$currentH12 = $currentH24 % 12 ?: 12;
+$currentTime12 = sprintf('%02d:%02d:%02d', $currentH12, date('i'), date('s'));
+
+$jsCalculationInfo = json_encode([
+    'methodName' => $currentMethod['name'],
+    'methodKey'  => $CONFIG['method'],
+    'fajrAngle'  => $currentMethod['fajr'],
+    'ishaValue'  => $currentMethod['isha'],
+    'madhabLabel'=> $madhabLabel,
+    'city'       => $locationName,
+    'lat'        => $lat,
+    'lng'        => $lng
+], JSON_UNESCAPED_UNICODE);
+?>
 <!DOCTYPE html>
-<!-- saved from url=(0035)http://192.168.10.209:8080/hort.php -->
-<html lang="ar" dir="rtl"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><style>body {transition: opacity ease-in 0.2s; } 
-body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relative; } 
-</style>
-    
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>ساعة حائط المسجد | C L A I M S</title>
 
-    <link rel="manifest" href="http://192.168.10.209:8080/manifest.json">
+    <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#121212">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="ساعة المسجد">
-    <link rel="icon" type="image/png" sizes="192x192" href="http://192.168.10.209:8080/icon-192.png">
-    <link rel="icon" type="image/png" sizes="512x512" href="http://192.168.10.209:8080/icon-512.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 
-        <!-- تحميل خط الأرقام الرقمية (DSEG7) -->
-    <link href="https://cdn.jsdelivr.net/npm/dseg@0.46.0/css/dseg.css" rel="stylesheet">
-    
-    <!-- تحميل خط الآية الكريمة (Reem Kufi) -->
-    <link href="https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@400;700&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <script src="./ساعة حائط المسجد _ C L A I M S_files/OneSignalSDK.page.js.تنزيل" defer=""></script>
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
     <script>
       window.OneSignalDeferred = window.OneSignalDeferred || [];
       OneSignalDeferred.push(async function(OneSignal) {
         await OneSignal.init({
-          appId: "528cb1c3-6d21-4673-a6c3-3fe38ea0c456",
+          appId: "<?= $ONESIGNAL_APP_ID ?>",
           allowLocalhostAsSecureOrigin: true,
           notifyButton: { enable: false },
           serviceWorkerPath: 'OneSignalSDKWorker.js',
@@ -94,17 +283,17 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
       };
     </script>
 
-    <script src="./ساعة حائط المسجد _ C L A I M S_files/qrcode.min.js.تنزيل"></script>
-    <link rel="preconnect" href="https://cdn.jsdelivr.net/" crossorigin="">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/alarm-clock" rel="stylesheet">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/dseg.css" rel="stylesheet">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/andalus" rel="stylesheet">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/css2" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <link href="https://fonts.cdnfonts.com/css/alarm-clock" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/dseg@0.46.0/css/dseg.css" rel="stylesheet">
+    <link href="https://fonts.cdnfonts.com/css/andalus" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
 
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/css2(1)" rel="stylesheet">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/css2(2)" rel="stylesheet">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/css2(3)" rel="stylesheet">
-    <link href="./ساعة حائط المسجد _ C L A I M S_files/css2(4)" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Markazi+Text:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Lalezar&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@400;700&display=swap" rel="stylesheet">
        <style>
         @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap');
 
@@ -447,9 +636,9 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             display: flex;
             justify-content: space-between;
             color: var(--text-secondary);
-            font-size: 16px;
+            font-size: 12px;
             font-weight: bold;
-            padding: 0 50px;
+            padding: 0 8px;
             flex-shrink: 0;
         }
         .prayers-container {
@@ -465,18 +654,13 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background-color: #545541;
-            background-image: url('https://www.transparenttextures.com/patterns/wood-pattern.png'), linear-gradient(135deg, var(--wood-dark), var(--wood-dark-2));
-            background-size: 300px 300px, 100% 100%;
-            background-blend-mode: overlay;
-            border: 1px solid var(--wood-border);
-            padding: 6px 4px; /* زيادة المساحة العلوية والسفلية */
+            background: var(--bg-main);
+            border: 1px solid var(--border-color);
+            padding: 4px 10px;
             border-radius: 8px;
             flex: 1;
-            min-height: 45px; /* إعطاء ارتفاع ثابت لكل صف */
-            gap: 4px; /* مسافة بين العناصر */
+            min-height: 0;
         }
-
         .prayer-row.current-prayer {
             background: rgba(16, 185, 129, 0.08);
             border: 1px solid #10b981;
@@ -488,25 +672,23 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             100% { box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); }
         }
 
-           .prayer-name-box {
-            font-size: 1rem; /* تصغير اسم الصلاة */
+        .prayer-name-box {
+            font-size: clamp(1.1rem, 2.2vw, 1.45rem);
             font-weight: 700;
-            width: 36%; /* إعطاء مساحة أكبر للاسم */
+            color: var(--text-primary);
+            width: 30%;
             text-align: center;
-            white-space: nowrap; /* منع الاسم من النزول لسطر جديد */
-            overflow: hidden;
-            text-overflow: ellipsis; /* وضع نقاط إذا كان الاسم طويلاً */
         }
         .time-box { width: 35%; text-align: center; }
         .time-box .segment-display {
-            font-size: clamp(1.8rem, 4.8vw, 2.2rem);
+            font-size: clamp(1.4rem, 2.8vw, 1.2rem);
             width: 100%;
-            padding: 1px 2;
+            padding: 1px 0;
                         display: flex;
             justify-content: space-between;
             align-items: center;
             background: var(--bg-main);
-            border: 3px var(--border-color);
+            border: 0px var(--border-color);
     background-color: #676769
             background-image:
                 url('https://www.transparenttextures.com/patterns/wood-pattern.png'),
@@ -519,19 +701,6 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             min-height: 0;
         }
 
-                .time-box { 
-            width: 32%; /* تصغير العرض قليلاً لإعطاء مساحة للأسماء */
-            text-align: center;
-            overflow: hidden; /* منع خروج الأرقام */
-        }
-
-        .time-box .segment-display {
-            font-size: 1.1rem; /* تصغير حجم الأرقام قليلاً */
-            width: 100%;
-            padding: 2px 0;
-            letter-spacing: 0px; /* إلغاء المسافات الزائدة */
-            display: block; /* لملء المساحة */
-        }
         .led-red { color: #c2333a; }
         .led-green { color: #29e9a2; }
 
@@ -819,26 +988,17 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
         #remaining-value.led-green {
             color: #e64950 !important;
         }
-                /* إصلاح تراكب الأرقام */
-        .segment-display {
-            letter-spacing: 2px !important; 
-            display: inline-block;
-            padding: 2px 8px;
-        }
-        .main-clock-display {
-            font-size: 1.2rem !important; /* تصغير الساعة الرقمية قليلاً */
-        }
     </style>
-    <script src="./ساعة حائط المسجد _ C L A I M S_files/OneSignalSDK.page.es6.js.تنزيل" defer=""></script></head>
+    </head>
 <body>
 
-<audio id="silentAudio" loop="" src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA"></audio>
+<audio id="silentAudio" loop src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA"></audio>
 
 <div class="container" id="mainWrapper">
     <!-- شريط التحكم العلوي -->
     <div class="location-bar">
         <button class="location-btn" onclick="toggleFullScreen()" title="ملء الشاشة">🖥️</button>
-        <a href="http://192.168.10.209:8080/index.php" class="location-btn">⏱️</a>
+        <a href="index.php" class="location-btn">⏱️</a>
         <select class="location-select" id="city-select" onchange="changeCity(this.value)">
             <option value="">اختر مدينة...</option>
             <option value="35.4414,36.6508,خان شيخون">خان شيخون / إدلب</option>
@@ -860,7 +1020,7 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
         <button class="location-btn" id="pwa-install-btn" style="display:none;">📲 تثبيت</button>
         <button class="location-btn" id="ios-install-hint" onclick="showInstallInstructions()" style="display:none;">📲 تعليمات</button>
         <button class="location-btn" id="notif-status-btn" onclick="toggleNotifications()">🔕</button>
-        <button class="location-btn" id="audio-toggle-btn" onclick="toggleAudio(event)" style="background: linear-gradient(135deg, rgb(49, 146, 78) 0%, rgb(9, 95, 35) 100%); color: white;">🔊</button>
+        <button class="location-btn" id="audio-toggle-btn" onclick="toggleAudio(event)">🔇</button>
     </div>
 
     <!-- البطاقة الرئيسية -->
@@ -869,10 +1029,10 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
         <div class="quran-section">
             <div class="quran-headerb">بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ</div>
             <div class="quran-header">إِنَّ الصَّلَاةَ كَانَتْ عَلَى الْمُؤْمِنِينَ كِتَابًا مَّوْقُوتًا</div>
-            <div class="location-title">📍 خان شيخون</div>
+            <div class="location-title">📍 <?= htmlspecialchars($locationName); ?></div>
 
             <div class="qrs-top-bar">
-                <div id="qrcodes-top" title="https://clockislam.42web.io/index.php" data-built="1"><canvas width="90" height="90" style="display: none;"></canvas><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFoAAABaCAYAAAA4qEECAAAGNklEQVR4AeyagXbiOgxEc/v//9xXLTUzTq1gQpJyXsVZ4Yk0GoepxVJ2P5Zl+Tw6PpPHeh+nec3zGZ7hO2eNZ3TXPa9ch9Ff/fXnbAfK6LMd/tbvjP4ap2VvfOttLmttJ3sNWOAWzskw3LjQr853/cAgrvMcB29vuE7gzuhIVJzjQBl9jq8/VFOjQaMFY/xD7ckEjHV9XDPJZznQ75XpZnno++HnddYb+dToKFYc50AZfZyXm0qXGg39uPmd+VsB9Dy4XTvfsfc6hlsf4PRfwZca/Suv8E02/VWj38SDS27jV432Mc9erXOA+y8yMMYzOq4ZOOs5Mv+rRh/5Qt5dq4y+6CeUGh0j9Shm7hE04ms9UA2EM13vd47nQTpZHsQBXCrFrpXhtPmrkBr9Vas/BzpQRh9o5pZUZzTw8G91GHO2Npmp+ThmfNDezofn8tGb7eF5kC48h10ncGd0JCrOcaCMPsfXH6ofMUZHh+/i2tCPn9e8xzGox/mg/LN8oPuXJO/3PY7Ef/dEu7sX4DL6ApNjiw8Yj2AUW8CYA8qDcOuLFZRfjyKoFtxReA+I7/kMQ84H1UDY7wHGeefM4jrRs069yCujXzRwtr371AEaFRD20cyEnQPjXlAe6KSA+y9LXgDlfY+M4/mMH5ysBvv3C90WIB1gqRO9XPMoo6/xuU70RT4vL3288/c50HuS3zwo7/zAzovrUTgHpOV574MxB5SHHnu/64J4nncM4oCwawautw537URcRp9orkt3H+8+Pz+7L1viyEd4A2g8PB+8Flke1Av5Fzve77jpx+p5kG7UWjhnjRsn1nWtXUetRcvF2nKxxvVM1ImecekAThl9gIkzEp3RoBEE4RiRUYA4IJxtvNZwHqgfhL0HlAfhTMfzrhPYazDWco5jED+0WmQcYOmMXupxmgNl9GnW9sKp0W0cYgWNSt+uq+C1UHa5f1EELOsHcK+va+0axpy2V6yNG2tct4jrFiAdoKV/rK031h/F70TUWnyn/i0tN1pTo/911tNhDpTRh1m5LZR+1wHcx9pHAZR3aVDe+Y6dH9hrjqO2N0D3AcKuH9j147qF5zMM0oU5XCc6c/Pg/BsZffArezO57ruOV+6tjV6soHHaoxkajwK0h3Nn9wP1z/TAmJ/t7fnAdaJnXD6AU0YfYOKMxJTR8HhsQJwYlRZ+EyAO4KX7JxyYy3szcO/3fLuHWD2/xjDud15ojMI5W3jK6C2Bqs05UEbP+fQyqzPaR8OVszxo5JwDymc6wc9qnncM0o3+Fs7Zg5tOrKA9QNh1YZyP/hYgDlBfky4XPboTfdGef3Kb9LuONgKxujNxPQrQqDj/Vex7ZVoznHXvTI9zQK/P864L4ng+cJ3ocGFZTn8uo0+3+LbB1HcdoJEA4ZvE7dnHyfGtensG9QK35M5nYPhListBzoFxLbt3192D60TvcW1HTxm9w7Q9LWX0Htd29KQf70DvYdn7FogDwn4fMM4HB1QD4aiNwu/DMajX864B4gBeur/XAynuGuwC1ON7r3GdaDPtTFhGn+muaacf7/zoG3/433qdG9j5jqPmkdVA4+gcGOed4zjbyzmBnZfh4D0K0P1Bj+tEP3LvoHoZfZCRj2S6Tx3QHff0b2DY5vmmPorQ9zlvBruW8z0P2iPjBN9rjmHc7xzHodUiy0e9TrS7cyIuo08016U7o+OI7w0XdQwaxS1t73Ge50FaMMbeC+K4zhb2/owH0gXhrd7O6Ey48q87UEa/7uGUQmo0aCRgjGd22BqnmX7nuJZj54DuNeM4PzCoB8Y4eC1c1zGMe4H6V/Dlokd6oi/a/89sc7rRoHFauwqqwWO87m/XPr6OWz1W6PWd5zi4jwJ6Lbhde59rBj7daN/8L+O3Nfr/9kM53egYmxZb5jVOrM6L6xaedwy30YV8bRpt9X7Hrb5enZNh74H+Xk43Orupv5Yvoy/6iadG+xhk+Nl7hH6cXBdUc11QHoSdM4NBvdBj7wfVPO/Y79sxqNfzgVOjXbjw6w6U0a97OKXQGQ06+vAcznYD6aw5kNcaN8auRcvFCupt9Vij1iKus2ic9er8da1dg/ZuuUdrZ/QjctX3O1BG7/fuqc4y+im79pP/AwAA//9WZPDpAAAABklEQVQDAHQiPXPKEqYTAAAAAElFTkSuQmCC" style="display: block;"></div>
+                <div id="qrcodes-top"></div>
             </div>
         </div>
 
@@ -881,24 +1041,30 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             <div class="header-clocks-section">
                 <!-- الساعة الرقمية -->
                 <div class="clock-box-right">
-                    <div class="segment-display main-clock-display" id="main-clock-display-text">07:12:11</div>
-                    <div class="day-box" style="margin-top:2px;">الثلاثاء</div>
+                    <div class="segment-display main-clock-display" id="main-clock-display-text">
+                        <?= $currentTime12; ?>
+                    </div>
+                    <div class="day-box" style="margin-top:2px;"><?= $todayName; ?></div>
                 </div>
 
                 <!-- التاريخ -->
                 <div class="clock-box-left">
-                    <div class="segment-display led-red" id="date-numbers-display">2026/11/03</div>
-                    <div class="hijri-month-tag" id="date-month-display" style="margin-top: 2px; background: rgb(0, 59, 74);">تشرين الثاني</div>
+                    <div class="segment-display led-red" id="date-numbers-display">
+                        <?= $gregorianNumbers; ?>
+                    </div>
+                    <div class="hijri-month-tag" id="date-month-display" style="margin-top:2px;">
+                        <?= $gregorianMonthName; ?>
+                    </div>
                 </div>
 
                 <!-- ساعة العقارب -->
                 <div class="analog-center-box">
                     <div class="analog-clock" id="analogClock">
                         <div class="center-dot"></div>
-                        <div class="hand hour-hand" id="analog-hour" style="transform: rotate(216deg);"></div>
-                        <div class="hand minute-hand" id="analog-min" style="transform: rotate(73.1deg);"></div>
-                        <div class="hand second-hand" id="analog-sec" style="transform: rotate(66deg);"></div>
-                    <div class="clock-tick tick-hour" style="left: 50%; top: 4%; transform: translate(-50%, -50%) rotate(0deg);"></div><div class="clock-tick tick-min" style="left: 54.9651%; top: 2.76021%; transform: translate(-50%, -50%) rotate(6deg);"></div><div class="clock-tick tick-min" style="left: 59.8758%; top: 3.53799%; transform: translate(-50%, -50%) rotate(12deg);"></div><div class="clock-tick tick-min" style="left: 64.6783%; top: 4.82482%; transform: translate(-50%, -50%) rotate(18deg);"></div><div class="clock-tick tick-min" style="left: 69.32%; top: 6.60659%; transform: translate(-50%, -50%) rotate(24deg);"></div><div class="clock-tick tick-hour" style="left: 73%; top: 10.1628%; transform: translate(-50%, -50%) rotate(30deg);"></div><div class="clock-tick tick-min" style="left: 77.9198%; top: 11.5717%; transform: translate(-50%, -50%) rotate(36deg);"></div><div class="clock-tick tick-min" style="left: 81.7837%; top: 14.7006%; transform: translate(-50%, -50%) rotate(42deg);"></div><div class="clock-tick tick-min" style="left: 85.2994%; top: 18.2163%; transform: translate(-50%, -50%) rotate(48deg);"></div><div class="clock-tick tick-min" style="left: 88.4283%; top: 22.0802%; transform: translate(-50%, -50%) rotate(54deg);"></div><div class="clock-tick tick-hour" style="left: 89.8372%; top: 27%; transform: translate(-50%, -50%) rotate(60deg);"></div><div class="clock-tick tick-min" style="left: 93.3934%; top: 30.68%; transform: translate(-50%, -50%) rotate(66deg);"></div><div class="clock-tick tick-min" style="left: 95.1752%; top: 35.3217%; transform: translate(-50%, -50%) rotate(72deg);"></div><div class="clock-tick tick-min" style="left: 96.462%; top: 40.1242%; transform: translate(-50%, -50%) rotate(78deg);"></div><div class="clock-tick tick-min" style="left: 97.2398%; top: 45.0349%; transform: translate(-50%, -50%) rotate(84deg);"></div><div class="clock-tick tick-hour" style="left: 96%; top: 50%; transform: translate(-50%, -50%) rotate(90deg);"></div><div class="clock-tick tick-min" style="left: 97.2398%; top: 54.9651%; transform: translate(-50%, -50%) rotate(96deg);"></div><div class="clock-tick tick-min" style="left: 96.462%; top: 59.8758%; transform: translate(-50%, -50%) rotate(102deg);"></div><div class="clock-tick tick-min" style="left: 95.1752%; top: 64.6783%; transform: translate(-50%, -50%) rotate(108deg);"></div><div class="clock-tick tick-min" style="left: 93.3934%; top: 69.32%; transform: translate(-50%, -50%) rotate(114deg);"></div><div class="clock-tick tick-hour" style="left: 89.8372%; top: 73%; transform: translate(-50%, -50%) rotate(120deg);"></div><div class="clock-tick tick-min" style="left: 88.4283%; top: 77.9198%; transform: translate(-50%, -50%) rotate(126deg);"></div><div class="clock-tick tick-min" style="left: 85.2994%; top: 81.7837%; transform: translate(-50%, -50%) rotate(132deg);"></div><div class="clock-tick tick-min" style="left: 81.7837%; top: 85.2994%; transform: translate(-50%, -50%) rotate(138deg);"></div><div class="clock-tick tick-min" style="left: 77.9198%; top: 88.4283%; transform: translate(-50%, -50%) rotate(144deg);"></div><div class="clock-tick tick-hour" style="left: 73%; top: 89.8372%; transform: translate(-50%, -50%) rotate(150deg);"></div><div class="clock-tick tick-min" style="left: 69.32%; top: 93.3934%; transform: translate(-50%, -50%) rotate(156deg);"></div><div class="clock-tick tick-min" style="left: 64.6783%; top: 95.1752%; transform: translate(-50%, -50%) rotate(162deg);"></div><div class="clock-tick tick-min" style="left: 59.8758%; top: 96.462%; transform: translate(-50%, -50%) rotate(168deg);"></div><div class="clock-tick tick-min" style="left: 54.9651%; top: 97.2398%; transform: translate(-50%, -50%) rotate(174deg);"></div><div class="clock-tick tick-hour" style="left: 50%; top: 96%; transform: translate(-50%, -50%) rotate(180deg);"></div><div class="clock-tick tick-min" style="left: 45.0349%; top: 97.2398%; transform: translate(-50%, -50%) rotate(186deg);"></div><div class="clock-tick tick-min" style="left: 40.1242%; top: 96.462%; transform: translate(-50%, -50%) rotate(192deg);"></div><div class="clock-tick tick-min" style="left: 35.3217%; top: 95.1752%; transform: translate(-50%, -50%) rotate(198deg);"></div><div class="clock-tick tick-min" style="left: 30.68%; top: 93.3934%; transform: translate(-50%, -50%) rotate(204deg);"></div><div class="clock-tick tick-hour" style="left: 27%; top: 89.8372%; transform: translate(-50%, -50%) rotate(210deg);"></div><div class="clock-tick tick-min" style="left: 22.0802%; top: 88.4283%; transform: translate(-50%, -50%) rotate(216deg);"></div><div class="clock-tick tick-min" style="left: 18.2163%; top: 85.2994%; transform: translate(-50%, -50%) rotate(222deg);"></div><div class="clock-tick tick-min" style="left: 14.7006%; top: 81.7837%; transform: translate(-50%, -50%) rotate(228deg);"></div><div class="clock-tick tick-min" style="left: 11.5717%; top: 77.9198%; transform: translate(-50%, -50%) rotate(234deg);"></div><div class="clock-tick tick-hour" style="left: 10.1628%; top: 73%; transform: translate(-50%, -50%) rotate(240deg);"></div><div class="clock-tick tick-min" style="left: 6.60659%; top: 69.32%; transform: translate(-50%, -50%) rotate(246deg);"></div><div class="clock-tick tick-min" style="left: 4.82482%; top: 64.6783%; transform: translate(-50%, -50%) rotate(252deg);"></div><div class="clock-tick tick-min" style="left: 3.53799%; top: 59.8758%; transform: translate(-50%, -50%) rotate(258deg);"></div><div class="clock-tick tick-min" style="left: 2.76021%; top: 54.9651%; transform: translate(-50%, -50%) rotate(264deg);"></div><div class="clock-tick tick-hour" style="left: 4%; top: 50%; transform: translate(-50%, -50%) rotate(270deg);"></div><div class="clock-tick tick-min" style="left: 2.76021%; top: 45.0349%; transform: translate(-50%, -50%) rotate(276deg);"></div><div class="clock-tick tick-min" style="left: 3.53799%; top: 40.1242%; transform: translate(-50%, -50%) rotate(282deg);"></div><div class="clock-tick tick-min" style="left: 4.82482%; top: 35.3217%; transform: translate(-50%, -50%) rotate(288deg);"></div><div class="clock-tick tick-min" style="left: 6.60659%; top: 30.68%; transform: translate(-50%, -50%) rotate(294deg);"></div><div class="clock-tick tick-hour" style="left: 10.1628%; top: 27%; transform: translate(-50%, -50%) rotate(300deg);"></div><div class="clock-tick tick-min" style="left: 11.5717%; top: 22.0802%; transform: translate(-50%, -50%) rotate(306deg);"></div><div class="clock-tick tick-min" style="left: 14.7006%; top: 18.2163%; transform: translate(-50%, -50%) rotate(312deg);"></div><div class="clock-tick tick-min" style="left: 18.2163%; top: 14.7006%; transform: translate(-50%, -50%) rotate(318deg);"></div><div class="clock-tick tick-min" style="left: 22.0802%; top: 11.5717%; transform: translate(-50%, -50%) rotate(324deg);"></div><div class="clock-tick tick-hour" style="left: 27%; top: 10.1628%; transform: translate(-50%, -50%) rotate(330deg);"></div><div class="clock-tick tick-min" style="left: 30.68%; top: 6.60659%; transform: translate(-50%, -50%) rotate(336deg);"></div><div class="clock-tick tick-min" style="left: 35.3217%; top: 4.82482%; transform: translate(-50%, -50%) rotate(342deg);"></div><div class="clock-tick tick-min" style="left: 40.1242%; top: 3.53799%; transform: translate(-50%, -50%) rotate(348deg);"></div><div class="clock-tick tick-min" style="left: 45.0349%; top: 2.76021%; transform: translate(-50%, -50%) rotate(354deg);"></div><div class="clock-number" style="left: 68%; top: 18.8231%;">1</div><div class="clock-number" style="left: 81.1769%; top: 32%;">2</div><div class="clock-number" style="left: 86%; top: 50%;">3</div><div class="clock-number" style="left: 81.1769%; top: 68%;">4</div><div class="clock-number" style="left: 68%; top: 81.1769%;">5</div><div class="clock-number" style="left: 50%; top: 86%;">6</div><div class="clock-number" style="left: 32%; top: 81.1769%;">7</div><div class="clock-number" style="left: 18.8231%; top: 68%;">8</div><div class="clock-number" style="left: 14%; top: 50%;">9</div><div class="clock-number" style="left: 18.8231%; top: 32%;">10</div><div class="clock-number" style="left: 32%; top: 18.8231%;">11</div><div class="clock-number" style="left: 50%; top: 14%;">12</div></div>
+                        <div class="hand hour-hand" id="analog-hour"></div>
+                        <div class="hand minute-hand" id="analog-min"></div>
+                        <div class="hand second-hand" id="analog-sec"></div>
+                    </div>
                 </div>
             </div>
 
@@ -911,61 +1077,18 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
                 </div>
 
                 <div class="prayers-container">
-                                            <div class="prayer-row" id="row-Fajr" data-time="05:30" data-iqama="06:00">
+                    <?php foreach ($prayersData as $p): ?>
+                        <div class="prayer-row" id="row-<?= $p['key']; ?>" data-time="<?= $p['adhan']; ?>" data-iqama="<?= $p['iqama']; ?>">
                             <div class="time-box">
-                                <div class="segment-display led-red">05:30</div>
+                                <div class="segment-display led-red"><?= $p['adhan12']; ?></div>
                             </div>
-                            <div class="prayer-name-box">الفَجْر</div>
+                            <div class="prayer-name-box"><?= $p['display'] ?? $p['name']; ?></div>
                             <div class="time-box">
-                                <div class="segment-display led-green">06:00</div>
-                            </div>
-                        </div>
-                                            <div class="prayer-row" id="row-Sunrise" data-time="06:56" data-iqama="07:16">
-                            <div class="time-box">
-                                <div class="segment-display led-red">06:56</div>
-                            </div>
-                            <div class="prayer-name-box"><span style="color:#f87171;">الشّرُوق</span> &nbsp; <span style="color:#34d399;">الضُّحى</span></div>
-                            <div class="time-box">
-                                <div class="segment-display led-green">07:16</div>
+                                <div class="segment-display led-green"><?= $p['iqama12']; ?></div>
                             </div>
                         </div>
-                                            <div class="prayer-row" id="row-Dhuhr" data-time="12:16" data-iqama="12:31">
-                            <div class="time-box">
-                                <div class="segment-display led-red">12:16</div>
-                            </div>
-                            <div class="prayer-name-box">الظُّهْـــر</div>
-                            <div class="time-box">
-                                <div class="segment-display led-green">12:31</div>
-                            </div>
-                        </div>
-                                            <div class="prayer-row" id="row-Asr" data-time="15:14" data-iqama="15:29">
-                            <div class="time-box">
-                                <div class="segment-display led-red">03:14</div>
-                            </div>
-                            <div class="prayer-name-box">العَصْـــر</div>
-                            <div class="time-box">
-                                <div class="segment-display led-green">03:29</div>
-                            </div>
-                        </div>
-                                            <div class="prayer-row" id="row-Maghrib" data-time="17:37" data-iqama="17:47">
-                            <div class="time-box">
-                                <div class="segment-display led-red">05:37</div>
-                            </div>
-                            <div class="prayer-name-box">المَغْــرب</div>
-                            <div class="time-box">
-                                <div class="segment-display led-green">05:47</div>
-                            </div>
-                        </div>
-                                            <div class="prayer-row current-prayer" id="row-Isha" data-time="18:58" data-iqama="19:13">
-                            <div class="time-box">
-                                <div class="segment-display led-red">06:58</div>
-                            </div>
-                            <div class="prayer-name-box">العِشَــاء</div>
-                            <div class="time-box">
-                                <div class="segment-display led-green">07:13</div>
-                            </div>
-                        </div>
-                                    </div>
+                    <?php endforeach; ?>
+                </div>
             </div>
         </div>
 
@@ -976,19 +1099,19 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
                 <div style="display:flex; align-items:center; gap:10px;">
                     <span>🌡️ °C</span>
                     <span class="segment-display led-red" id="temp-display-box" style="font-size: 1.4rem; padding: 1px 4px;">
-                        <span id="temp-val">--</span>
+                        <span id="temp-val"><?= $temperature; ?></span>
                     </span>
                 </div>
             </div>
             <div class="bottom-cell">
                 <div class="credit-mini">
                     إعداد: <strong>عدنان أحمد هنداوي</strong> | 📱 <a href="https://wa.me/963993357617" target="_blank">+963993357617</a><br>
-                    ◉ الزوار: <span id="visitor-count">26</span>
+                    ◉ الزوار: <span id="visitor-count">...</span>
                 </div>
             </div>
             <div class="bottom-cell ">
-                <div class="label" id="remaining-label">الوقت المتبقي لصلاة العشــاء</div>
-                <div class="segment-display led-green" style="font-size: 1.4rem;color: #34d399 !important; padding: 1px 4px;" id="remaining-value">00:00:49</div>
+                <div class="label"  id="remaining-label">المتبقي للإقامة</div>
+                <div class="segment-display led-green" style="font-size: 0.8rem;color: #34d399 !important; padding: 1px 4px;" id="remaining-value">--:--</div>
             </div>
         </div>
     </div>
@@ -1010,19 +1133,16 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
 
     
 <script>
-const hijriData = { numbers: "1448/05/22", month: "جمادى الأولى" };
-const gregorianData = { numbers: "2026/11/03", month: "تشرين الثاني" };
+const hijriData = { numbers: "<?= $hijri['numbers']; ?>", month: "<?= $hijri['month_name']; ?>" };
+const gregorianData = { numbers: "<?= $gregorianNumbers; ?>", month: "<?= $gregorianMonthName; ?>" };
 var prayers = [
-        { key:"Fajr", name:"الفجر", adhan:"05:30", iqama:"06:00" },
-        { key:"Sunrise", name:"الشروق  الضحى", adhan:"06:56", iqama:"07:16" },
-        { key:"Dhuhr", name:"الظهـــر", adhan:"12:16", iqama:"12:31" },
-        { key:"Asr", name:"العصـــر", adhan:"15:14", iqama:"15:29" },
-        { key:"Maghrib", name:"المغــرب", adhan:"17:37", iqama:"17:47" },
-        { key:"Isha", name:"العشــاء", adhan:"18:58", iqama:"19:13" },
-    ];
+    <?php foreach ($prayersData as $p): ?>
+    { key:"<?= $p['key'] ?>", name:"<?= $p['name'] ?>", adhan:"<?= $p['adhan'] ?>", iqama:"<?= $p['iqama'] ?>" },
+    <?php endforeach; ?>
+];
 
 // ★★★ معلومات مصدر المواقيت ★★★
-let calculationInfo = {"methodName":"رابطة العالم الإسلامي","methodKey":"MWL","fajrAngle":18,"ishaValue":17,"madhabLabel":"الشافعي (ظل المثل)","city":"خان شيخون \/ إدلب","lat":35.4414,"lng":36.6508};
+let calculationInfo = <?= $jsCalculationInfo ?>;
 
 // تحديث المعلومات فوراً إذا كان هناك مدينة محفوظة مسبقاً في الجهاز
 const savedCityInfo = localStorage.getItem('prayer_city');
@@ -1633,8 +1753,7 @@ setInterval(async function() {
 }, 30000);
 </script>
 
-<script src="./ساعة حائط المسجد _ C L A I M S_files/prayer-times.js.تنزيل"></script>
+<script src="prayer-times.js"></script>
 
-
-
-</body></html>
+</body>
+</html>
