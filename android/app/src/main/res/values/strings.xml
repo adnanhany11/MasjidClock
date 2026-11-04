@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">MasjidClock</string>
-    <string name="title_activity_main">MasjidClock</string>
-    <string name="package_name">com.masjid.clock</string>
-    <string name="custom_url_scheme">com.masjid.clock</string>
-</resources>
