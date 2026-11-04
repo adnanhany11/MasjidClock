@@ -465,13 +465,18 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background: var(--bg-main);
-            border: 1px solid var(--border-color);
-            padding: 4px 10px;
+            background-color: #545541;
+            background-image: url('https://www.transparenttextures.com/patterns/wood-pattern.png'), linear-gradient(135deg, var(--wood-dark), var(--wood-dark-2));
+            background-size: 300px 300px, 100% 100%;
+            background-blend-mode: overlay;
+            border: 1px solid var(--wood-border);
+            padding: 6px 4px; /* زيادة المساحة العلوية والسفلية */
             border-radius: 8px;
             flex: 1;
-            min-height: 0;
+            min-height: 45px; /* إعطاء ارتفاع ثابت لكل صف */
+            gap: 4px; /* مسافة بين العناصر */
         }
+
         .prayer-row.current-prayer {
             background: rgba(16, 185, 129, 0.08);
             border: 1px solid #10b981;
@@ -483,12 +488,14 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             100% { box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); }
         }
 
-        .prayer-name-box {
-            font-size: clamp(1.1rem, 2.2vw, 1.45rem);
+           .prayer-name-box {
+            font-size: 1rem; /* تصغير اسم الصلاة */
             font-weight: 700;
-            color: var(--text-primary);
-            width: 30%;
+            width: 36%; /* إعطاء مساحة أكبر للاسم */
             text-align: center;
+            white-space: nowrap; /* منع الاسم من النزول لسطر جديد */
+            overflow: hidden;
+            text-overflow: ellipsis; /* وضع نقاط إذا كان الاسم طويلاً */
         }
         .time-box { width: 35%; text-align: center; }
         .time-box .segment-display {
@@ -512,6 +519,19 @@ body[unresolved] {opacity: 0; display: block; overflow: hidden; position: relati
             min-height: 0;
         }
 
+                .time-box { 
+            width: 32%; /* تصغير العرض قليلاً لإعطاء مساحة للأسماء */
+            text-align: center;
+            overflow: hidden; /* منع خروج الأرقام */
+        }
+
+        .time-box .segment-display {
+            font-size: 1.1rem; /* تصغير حجم الأرقام قليلاً */
+            width: 100%;
+            padding: 2px 0;
+            letter-spacing: 0px; /* إلغاء المسافات الزائدة */
+            display: block; /* لملء المساحة */
+        }
         .led-red { color: #c2333a; }
         .led-green { color: #29e9a2; }
 
